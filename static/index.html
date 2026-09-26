@@ -1,0 +1,480 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pawn Demo</title>
+<style>
+  :root {
+    --bg: #1d2127;
+    --panel: #272c34;
+    --text: #e8e6e1;
+    --muted: #9aa0a8;
+    --accent: #d9a441;
+    --error: #e5736b;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: radial-gradient(ellipse at 50% 30%, #2d333c 0%, var(--bg) 70%);
+    color: var(--text);
+    font: 15px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  }
+  header {
+    width: 100%;
+    max-width: 900px;
+    padding: 16px;
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+  h1 { margin: 0; font-size: 20px; font-weight: 600; letter-spacing: .02em; }
+  .stats { color: var(--muted); font-variant-numeric: tabular-nums; }
+  .stats b { color: var(--text); font-weight: 600; }
+  main {
+    flex: 1;
+    width: 100%;
+    max-width: 900px;
+    padding: 0 16px;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+  canvas {
+    width: 100%;
+    flex: 1;
+    min-height: 320px;
+    display: block;
+    cursor: pointer;
+    touch-action: manipulation;
+  }
+  footer {
+    width: 100%;
+    max-width: 900px;
+    padding: 12px 16px 20px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+  #status { color: var(--muted); min-height: 1.4em; }
+  #status.error { color: var(--error); }
+  button {
+    background: var(--panel);
+    color: var(--text);
+    border: 1px solid #3a414c;
+    border-radius: 6px;
+    padding: 7px 14px;
+    font: inherit;
+    cursor: pointer;
+  }
+  button:hover { border-color: var(--accent); }
+  button:disabled { opacity: .5; cursor: default; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Pawn Demo</h1>
+  <div class="stats">Square <b id="square">–</b> · Moves <b id="moves">0</b></div>
+</header>
+<main>
+  <canvas id="scene" aria-label="5 by 5 slanted board with a black pawn"></canvas>
+</main>
+<footer>
+  <div id="status">Click a highlighted square, or use the arrow keys.</div>
+  <button id="reset" type="button">Reset</button>
+</footer>
+
+<script>
+"use strict";
+
+// ---------------------------------------------------------------------------
+// Server communication (AJAX). The session cookie is HttpOnly and sent
+// automatically by the browser; the page never sees it.
+// ---------------------------------------------------------------------------
+const api = {
+  async call(method, path, body) {
+    const res = await fetch(path, {
+      method,
+      credentials: "same-origin",
+      headers: body ? { "Content-Type": "application/json" } : undefined,
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const err = new Error(data.error || `HTTP ${res.status}`);
+      err.state = data.state;
+      throw err;
+    }
+    return data;
+  },
+  state() { return this.call("GET", "/api/state"); },
+  move(x, y) { return this.call("POST", "/api/move", { x, y }); },
+  reset() { return this.call("POST", "/api/reset"); },
+};
+
+// ---------------------------------------------------------------------------
+// Tiny 3D math
+// ---------------------------------------------------------------------------
+const v3 = {
+  add: (a, b) => [a[0] + b[0], a[1] + b[1], a[2] + b[2]],
+  sub: (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]],
+  scale: (a, s) => [a[0] * s, a[1] * s, a[2] * s],
+  dot: (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2],
+  cross: (a, b) => [
+    a[1] * b[2] - a[2] * b[1],
+    a[2] * b[0] - a[0] * b[2],
+    a[0] * b[1] - a[1] * b[0],
+  ],
+  norm(a) { const l = Math.hypot(a[0], a[1], a[2]) || 1; return [a[0] / l, a[1] / l, a[2] / l]; },
+};
+
+// ---------------------------------------------------------------------------
+// Board: a 5x5 grid lying on an inclined plane. World axes: X right,
+// Y up, Z toward the viewer. Row 0 is the far (high) edge.
+// ---------------------------------------------------------------------------
+const N = 5;
+const SLOPE_Z = -0.32;   // rise per square going away from the viewer
+const SLOPE_X = 0.20;    // sideways tilt, rising to the right
+const THICKNESS = 0.35;
+
+const surfaceY = (x, z) => SLOPE_X * x + SLOPE_Z * z;
+const surfacePoint = (x, z) => [x, surfaceY(x, z), z];
+const UP = v3.norm([-SLOPE_X, 1, -SLOPE_Z]); // plane normal
+const squareCenter = (col, row) => surfacePoint(col - (N - 1) / 2, row - (N - 1) / 2);
+
+// Directional light (from upper left, slightly toward the viewer).
+const LIGHT = v3.norm([-0.5, 1.0, 0.55]);
+
+// ---------------------------------------------------------------------------
+// Pawn mesh: a surface of revolution built from a 2D profile (radius, height)
+// ---------------------------------------------------------------------------
+function buildPawn() {
+  const profile = [
+    [0.00, 0.000], [0.36, 0.000], [0.37, 0.030], [0.36, 0.070],
+    [0.31, 0.100], [0.30, 0.130], [0.25, 0.160], [0.19, 0.210],
+    [0.15, 0.300], [0.125, 0.420], [0.11, 0.540], [0.10, 0.610],
+    [0.20, 0.630], [0.215, 0.660], [0.20, 0.690], [0.10, 0.710],
+  ];
+  // Spherical head.
+  const hc = 0.855, hr = 0.165;
+  for (let i = 0; i <= 10; i++) {
+    const a = -Math.PI / 2 * 0.62 + (Math.PI / 2 + Math.PI / 2 * 0.62) * (i / 10);
+    profile.push([Math.max(0, hr * Math.cos(a)), hc + hr * Math.sin(a)]);
+  }
+  profile[profile.length - 1][0] = 0;
+
+  const SEG = 32;
+  const rings = profile.map(([r, h]) => {
+    const ring = [];
+    for (let s = 0; s < SEG; s++) {
+      const t = (s / SEG) * Math.PI * 2;
+      ring.push([r * Math.cos(t), h, r * Math.sin(t)]);
+    }
+    return ring;
+  });
+  const faces = [];
+  for (let i = 0; i < rings.length - 1; i++) {
+    for (let s = 0; s < SEG; s++) {
+      const s2 = (s + 1) % SEG;
+      // Wound so the cross product points outward.
+      faces.push([rings[i][s], rings[i + 1][s], rings[i + 1][s2], rings[i][s2]]);
+    }
+  }
+  return faces;
+}
+const PAWN_FACES = buildPawn();
+
+// Local pawn frame aligned with the board's normal so it sits flush.
+const PAWN_Y = UP;
+const PAWN_X = v3.norm(v3.cross(PAWN_Y, [0, 0, 1]));
+const PAWN_Z = v3.cross(PAWN_X, PAWN_Y);
+const PAWN_SCALE = 1.35;
+function pawnToWorld(p, origin) {
+  p = v3.scale(p, PAWN_SCALE);
+  return v3.add(origin, v3.add(v3.scale(PAWN_X, p[0]),
+    v3.add(v3.scale(PAWN_Y, p[1]), v3.scale(PAWN_Z, p[2]))));
+}
+
+// ---------------------------------------------------------------------------
+// Camera
+// ---------------------------------------------------------------------------
+const canvas = document.getElementById("scene");
+const ctx = canvas.getContext("2d");
+const cam = { yaw: -0.38, pitch: 0.62, dist: 9.2, target: [0, 0.3, 0.45], focal: 1, cx: 0, cy: 0 };
+
+function toCamera(p) {
+  let [x, y, z] = v3.sub(p, cam.target);
+  const cy = Math.cos(cam.yaw), sy = Math.sin(cam.yaw);
+  [x, z] = [cy * x - sy * z, sy * x + cy * z];
+  const cp = Math.cos(cam.pitch), sp = Math.sin(cam.pitch);
+  [y, z] = [cp * y - sp * z, sp * y + cp * z];
+  return [x, y, cam.dist - z]; // depth grows away from the camera
+}
+function project(c) {
+  return [cam.cx + cam.focal * c[0] / c[2], cam.cy - cam.focal * c[1] / c[2]];
+}
+const cameraPos = (() => {
+  // Inverse of toCamera applied to the camera origin.
+  const back = [0, 0, cam.dist];
+  const cp = Math.cos(cam.pitch), sp = Math.sin(cam.pitch);
+  let [x, y, z] = [back[0], cp * back[1] + sp * back[2], -sp * back[1] + cp * back[2]];
+  const cy = Math.cos(cam.yaw), sy = Math.sin(cam.yaw);
+  [x, z] = [cy * x + sy * z, -sy * x + cy * z];
+  return v3.add([x, y, z], cam.target);
+})();
+
+function resize() {
+  const dpr = window.devicePixelRatio || 1;
+  const rect = canvas.getBoundingClientRect();
+  canvas.width = Math.round(rect.width * dpr);
+  canvas.height = Math.round(rect.height * dpr);
+  cam.cx = canvas.width / 2;
+  cam.cy = canvas.height / 2;
+  cam.focal = Math.min(canvas.width * 1.0, canvas.height * 1.25);
+  draw();
+}
+
+// ---------------------------------------------------------------------------
+// Shading
+// ---------------------------------------------------------------------------
+function shade(base, normal, point, gloss) {
+  const diffuse = Math.max(0, v3.dot(normal, LIGHT));
+  const view = v3.norm(v3.sub(cameraPos, point));
+  const half = v3.norm(v3.add(LIGHT, view));
+  const spec = gloss ? Math.pow(Math.max(0, v3.dot(normal, half)), gloss.power) * gloss.amount : 0;
+  const rim = gloss ? Math.pow(1 - Math.max(0, v3.dot(normal, view)), 3) * gloss.rim : 0;
+  const k = 0.35 + 0.65 * diffuse;
+  const c = base.map(ch => Math.min(255, Math.round(ch * k + 255 * spec + 90 * rim)));
+  return `rgb(${c[0]},${c[1]},${c[2]})`;
+}
+
+function fillPoly(points2d, style, stroke) {
+  ctx.beginPath();
+  ctx.moveTo(points2d[0][0], points2d[0][1]);
+  for (let i = 1; i < points2d.length; i++) ctx.lineTo(points2d[i][0], points2d[i][1]);
+  ctx.closePath();
+  ctx.fillStyle = style;
+  ctx.fill();
+  if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = 1; ctx.stroke(); }
+}
+
+// ---------------------------------------------------------------------------
+// Scene state
+// ---------------------------------------------------------------------------
+const state = { x: 2, y: 4, moves: 0, loaded: false };
+const anim = { from: null, to: null, start: 0, duration: 320 };
+let hover = null;
+let busy = false;
+let tileScreens = []; // [{col,row,poly}] for hit testing
+
+const LIGHT_SQ = [214, 190, 150];
+const DARK_SQ = [139, 101, 68];
+const EDGE = [92, 64, 42];
+
+function pawnOrigin(now) {
+  const target = squareCenter(state.x, state.y);
+  if (!anim.from) return target;
+  const t = Math.min(1, (now - anim.start) / anim.duration);
+  if (t >= 1) { anim.from = null; return target; }
+  const e = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+  const p = v3.add(anim.from, v3.scale(v3.sub(anim.to, anim.from), e));
+  return v3.add(p, v3.scale(UP, Math.sin(Math.PI * t) * 0.35)); // small hop
+}
+
+function isAdjacent(col, row) {
+  const dx = Math.abs(col - state.x), dy = Math.abs(row - state.y);
+  return (dx || dy) && dx <= 1 && dy <= 1;
+}
+
+function draw(now = performance.now()) {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  const h = (N - 1) / 2 + 0.5;
+
+  // Board slab sides (front and right faces are the ones visible).
+  const down = [0, -THICKNESS, 0];
+  const corner = (x, z) => surfacePoint(x, z);
+  const sides = [
+    [corner(-h, h), corner(h, h), v3.add(corner(h, h), down), v3.add(corner(-h, h), down)],
+    [corner(h, h), corner(h, -h), v3.add(corner(h, -h), down), v3.add(corner(h, h), down)],
+    [corner(-h, -h), corner(-h, h), v3.add(corner(-h, h), down), v3.add(corner(-h, -h), down)],
+  ];
+  for (const quad of sides) {
+    const n = v3.norm(v3.cross(v3.sub(quad[3], quad[0]), v3.sub(quad[1], quad[0])));
+    const mid = v3.scale(quad.reduce(v3.add), 0.25);
+    if (v3.dot(n, v3.sub(cameraPos, mid)) <= 0) continue;
+    fillPoly(quad.map(p => project(toCamera(p))), shade(EDGE, n, mid, null));
+  }
+
+  // Squares.
+  tileScreens = [];
+  for (let row = 0; row < N; row++) {
+    for (let col = 0; col < N; col++) {
+      const x0 = col - h, z0 = row - h;
+      const quad = [corner(x0, z0), corner(x0 + 1, z0), corner(x0 + 1, z0 + 1), corner(x0, z0 + 1)];
+      const poly = quad.map(p => project(toCamera(p)));
+      const base = (col + row) % 2 === 0 ? LIGHT_SQ : DARK_SQ;
+      const mid = squareCenter(col, row);
+      fillPoly(poly, shade(base, UP, mid, null), "rgba(0,0,0,0.25)");
+      tileScreens.push({ col, row, poly });
+
+      if (state.loaded && !busy && !anim.from && isAdjacent(col, row)) {
+        const isHover = hover && hover.col === col && hover.row === row;
+        fillPoly(poly, isHover ? "rgba(217,164,65,0.55)" : "rgba(217,164,65,0.20)");
+      }
+    }
+  }
+
+  // Pawn shadow: a soft ellipse on the surface offset away from the light.
+  const origin = pawnOrigin(now);
+  const lift = v3.dot(v3.sub(origin, squareCenter(state.x, state.y)), UP);
+  const shadowCenter = v3.add(surfacePoint(origin[0], origin[2]), [0.12, 0, -0.08]);
+  const shadowPts = [];
+  for (let i = 0; i < 28; i++) {
+    const t = (i / 28) * Math.PI * 2;
+    const r = 0.40 * PAWN_SCALE - lift * 0.3;
+    const x = shadowCenter[0] + Math.cos(t) * r, z = shadowCenter[2] + Math.sin(t) * r;
+    shadowPts.push(project(toCamera([x, surfaceY(x, z) + 0.002, z])));
+  }
+  fillPoly(shadowPts, `rgba(0,0,0,${0.35 - lift * 0.4})`);
+
+  // Pawn: transform, cull back faces, depth sort, paint.
+  const PAWN_BASE = [18, 18, 22];
+  const GLOSS = { power: 38, amount: 0.55, rim: 0.35 };
+  const polys = [];
+  for (const face of PAWN_FACES) {
+    const world = face.map(p => pawnToWorld(p, origin));
+    // Degenerate quads (at the poles) have two identical points; pick
+    // edges that still span the face.
+    let n = v3.cross(v3.sub(world[1], world[0]), v3.sub(world[3], world[0]));
+    if (Math.hypot(...n) < 1e-9) n = v3.cross(v3.sub(world[2], world[1]), v3.sub(world[3], world[1]));
+    n = v3.norm(n);
+    const mid = v3.scale(world.reduce(v3.add), 0.25);
+    if (v3.dot(n, v3.sub(cameraPos, mid)) <= 0) continue;
+    const camPts = world.map(toCamera);
+    const depth = (camPts[0][2] + camPts[1][2] + camPts[2][2] + camPts[3][2]) / 4;
+    polys.push({ pts: camPts.map(project), depth, color: shade(PAWN_BASE, n, mid, GLOSS) });
+  }
+  polys.sort((a, b) => b.depth - a.depth);
+  for (const p of polys) fillPoly(p.pts, p.color, p.color); // stroke hides seams
+
+  if (anim.from) requestAnimationFrame(draw);
+}
+
+// ---------------------------------------------------------------------------
+// Interaction
+// ---------------------------------------------------------------------------
+function pointInPoly(pt, poly) {
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const [xi, yi] = poly[i], [xj, yj] = poly[j];
+    if ((yi > pt[1]) !== (yj > pt[1]) && pt[0] < (xj - xi) * (pt[1] - yi) / (yj - yi) + xi) inside = !inside;
+  }
+  return inside;
+}
+
+function tileAt(evt) {
+  const rect = canvas.getBoundingClientRect();
+  const sx = canvas.width / rect.width, sy = canvas.height / rect.height;
+  const pt = [(evt.clientX - rect.left) * sx, (evt.clientY - rect.top) * sy];
+  return tileScreens.find(t => pointInPoly(pt, t.poly)) || null;
+}
+
+const $ = id => document.getElementById(id);
+const COLS = "abcde";
+function setStatus(msg, isError = false) {
+  $("status").textContent = msg;
+  $("status").classList.toggle("error", isError);
+}
+function applyState(s, animate) {
+  if (animate && (s.x !== state.x || s.y !== state.y)) {
+    anim.from = pawnOrigin(performance.now());
+    anim.to = squareCenter(s.x, s.y);
+    anim.start = performance.now();
+  }
+  Object.assign(state, { x: s.x, y: s.y, moves: s.moves, loaded: true });
+  $("square").textContent = `${COLS[s.x]}${N - s.y}`;
+  $("moves").textContent = s.moves;
+  requestAnimationFrame(draw);
+}
+
+async function requestMove(col, row) {
+  if (busy || !state.loaded) return;
+  busy = true;
+  $("reset").disabled = true;
+  try {
+    applyState(await api.move(col, row), true);
+    setStatus(`Moved to ${COLS[col]}${N - row}.`);
+  } catch (err) {
+    if (err.state) applyState(err.state, true);
+    setStatus(err.message, true);
+  } finally {
+    busy = false;
+    $("reset").disabled = false;
+    draw();
+  }
+}
+
+canvas.addEventListener("mousemove", e => {
+  const t = tileAt(e);
+  const same = (t && hover && t.col === hover.col && t.row === hover.row) || (!t && !hover);
+  hover = t;
+  canvas.style.cursor = t && isAdjacent(t.col, t.row) ? "pointer" : "default";
+  if (!same) draw();
+});
+canvas.addEventListener("mouseleave", () => { hover = null; draw(); });
+canvas.addEventListener("click", e => {
+  const t = tileAt(e);
+  if (!t) return;
+  if (!isAdjacent(t.col, t.row)) {
+    setStatus("The pawn moves one square at a time (including diagonals).", true);
+    return;
+  }
+  requestMove(t.col, t.row);
+});
+
+const KEYS = {
+  ArrowUp: [0, -1], ArrowDown: [0, 1], ArrowLeft: [-1, 0], ArrowRight: [1, 0],
+  w: [0, -1], s: [0, 1], a: [-1, 0], d: [1, 0],
+  q: [-1, -1], e: [1, -1], z: [-1, 1], c: [1, 1],
+};
+window.addEventListener("keydown", e => {
+  const d = KEYS[e.key] || KEYS[e.key.toLowerCase()];
+  if (!d) return;
+  e.preventDefault();
+  const col = state.x + d[0], row = state.y + d[1];
+  if (col < 0 || row < 0 || col >= N || row >= N) {
+    setStatus("That would leave the board.", true);
+    return;
+  }
+  requestMove(col, row);
+});
+
+$("reset").addEventListener("click", async () => {
+  if (busy) return;
+  busy = true;
+  try {
+    applyState(await api.reset(), true);
+    setStatus("Board reset.");
+  } catch (err) {
+    setStatus(err.message, true);
+  } finally {
+    busy = false;
+    draw();
+  }
+});
+
+window.addEventListener("resize", resize);
+resize();
+api.state()
+  .then(s => { applyState(s, false); })
+  .catch(err => setStatus(`Could not reach server: ${err.message}`, true));
+</script>
+</body>
+</html>
