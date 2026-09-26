@@ -43,22 +43,80 @@ direction, diagonals included.
 
 ---
 
-## Linux
+## Building (on Linux)
 
-These steps assume the Rust toolchain (`cargo` and `rustc`, 1.85 or newer for
-edition 2024) is already installed.
-
-### Build
+All builds are done on a Linux machine. These steps assume the Rust toolchain
+(`rustup`, `cargo` and `rustc`, 1.85 or newer for edition 2024) is already
+installed.
 
 ```bash
 git clone <this repository> pawn-demo
 cd pawn-demo
+```
+
+### Linux binary (native)
+
+```bash
 cargo build --release
 ```
 
 The binary is written to `target/release/pawn_demo`.
 
-### Run
+### Windows binary (cross-compiled from Linux)
+
+This uses Rust's `x86_64-pc-windows-gnu` target and the MinGW-w64 linker.
+
+1. Add the Windows target to the Rust toolchain (one time):
+
+   ```bash
+   rustup target add x86_64-pc-windows-gnu
+   ```
+
+2. Install the MinGW-w64 cross linker (one time) with your distribution's
+   package manager:
+
+   ```bash
+   sudo apt install gcc-mingw-w64-x86-64       # Debian / Ubuntu
+   sudo dnf install mingw64-gcc                # Fedora
+   sudo pacman -S mingw-w64-gcc                # Arch
+   ```
+
+   Check that it is on your `PATH`:
+
+   ```bash
+   x86_64-w64-mingw32-gcc --version
+   ```
+
+3. Build:
+
+   ```bash
+   cargo build --release --target x86_64-pc-windows-gnu
+   ```
+
+The Windows executable is written to
+`target/x86_64-pc-windows-gnu/release/pawn_demo.exe`. Cargo finds the
+`x86_64-w64-mingw32-gcc` linker automatically, so no extra configuration is
+needed.
+
+The `.exe` is self-contained. It only links against DLLs that ship with
+Windows, so you copy that one file to the Windows machine and nothing else.
+
+To check that it is really a Windows program:
+
+```bash
+file target/x86_64-pc-windows-gnu/release/pawn_demo.exe
+# PE32+ executable (console) x86-64, for MS Windows
+```
+
+If Wine is installed, you can smoke-test the `.exe` on Linux with
+`wine target/x86_64-pc-windows-gnu/release/pawn_demo.exe`. It prints its port
+and serves the page just like the Linux build.
+
+---
+
+## Running and accessing the program
+
+### Linux
 
 ```bash
 ./target/release/pawn_demo
@@ -73,76 +131,41 @@ Pawn demo listening on port 24180
 Open http://127.0.0.1:24180/ in your browser (Ctrl+C to stop)
 ```
 
-### Access
-
 Open the printed URL in any modern browser (Firefox, Chrome, and so on), for
 example `http://127.0.0.1:24180/`. The port is different each time the server
 starts. Press `Ctrl+C` in the terminal to stop the server.
 
----
+### Windows
 
-## Windows
+1. Copy `target/x86_64-pc-windows-gnu/release/pawn_demo.exe` to the Windows
+   machine, for example with a USB stick, a network share, or `scp`.
+2. Start it. Either
+   - double-click `pawn_demo.exe`, which opens a console window showing the
+     port, or
+   - run it from PowerShell or Command Prompt in the folder you copied it to:
 
-### Install the toolchain (one time)
+     ```powershell
+     .\pawn_demo.exe
+     ```
 
-1. Install the **Visual Studio Build Tools** with the *Desktop development
-   with C++* workload. The Rust MSVC toolchain needs its linker. From an
-   administrator PowerShell:
+   The console shows the port and URL, for example:
 
-   ```powershell
-   winget install Microsoft.VisualStudio.2022.BuildTools --override "--wait --passive --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
+   ```
+   Pawn demo listening on port 24180
+   Open http://127.0.0.1:24180/ in your browser (Ctrl+C to stop)
    ```
 
-   You can also download the installer from
-   <https://visualstudio.microsoft.com/visual-cpp-build-tools/>.
-2. Install Rust with **rustup**:
+3. Open the printed URL in Edge, Chrome, or Firefox on the same Windows
+   machine.
 
-   ```powershell
-   winget install Rustlang.Rustup
-   ```
+The server listens on localhost only by default, so Windows Firewall does not
+prompt. Press `Ctrl+C` in the console window (or close it) to stop the
+server.
 
-   You can also download and run `rustup-init.exe` from <https://rustup.rs>
-   and accept the defaults.
-3. Open a **new** PowerShell or Command Prompt window so that `cargo` is on
-   your `PATH`, then check it:
-
-   ```powershell
-   cargo --version
-   ```
-
-### Build
-
-```powershell
-git clone <this repository> pawn-demo
-cd pawn-demo
-cargo build --release
-```
-
-If you don't have Git, download the repository as a ZIP, extract it, and `cd`
-into the extracted folder.
-
-The binary is written to `target\release\pawn_demo.exe`.
-
-### Run
-
-```powershell
-.\target\release\pawn_demo.exe
-# or build and run in one step:
-cargo run --release
-```
-
-The console shows the port and URL, for example:
-
-```
-Pawn demo listening on port 24180
-Open http://127.0.0.1:24180/ in your browser (Ctrl+C to stop)
-```
-
-### Access
-
-Open the printed URL in Edge, Chrome, or Firefox. The server listens on
-localhost only by default, so Windows Firewall does not prompt. Press `Ctrl+C`
-in the console window to stop the server.
+The executable is not code-signed, so Windows may show a *"Windows protected
+your PC"* SmartScreen warning when you start it. Click **More info**, then
+**Run anyway**. If the file came from a download or a network share, you can
+also right-click it, open **Properties**, and tick **Unblock**.
 
 ---
 
@@ -160,13 +183,26 @@ The server binds to `127.0.0.1` by default. To reach it from other machines on
 your network, set `PAWN_BIND`:
 
 ```bash
-PAWN_BIND=0.0.0.0 ./target/release/pawn_demo          # Linux
+PAWN_BIND=0.0.0.0 ./target/release/pawn_demo                # Linux
 ```
 
 ```powershell
-$env:PAWN_BIND = "0.0.0.0"; .\target\release\pawn_demo.exe   # Windows PowerShell
+$env:PAWN_BIND = "0.0.0.0"; .\pawn_demo.exe   # Windows PowerShell
 ```
 
 Then browse to `http://<server-ip>:<port>/`. On Windows, allow the program
 through the firewall when prompted. This is an alpha demo with no TLS, so only
 expose it on networks you trust.
+
+## Alternative: building natively on Windows
+
+If you'd rather build on the Windows machine itself, first install the
+[Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/)
+with the *Desktop development with C++* workload, and install Rust from
+<https://rustup.rs>. Then, in a new PowerShell window:
+
+```powershell
+cd pawn-demo
+cargo build --release
+.\target\release\pawn_demo.exe
+```
