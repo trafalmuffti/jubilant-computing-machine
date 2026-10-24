@@ -4,6 +4,8 @@ A small Rust web server that serves a single page application. The page shows
 a black 3D chess pawn standing on a tilted 5×5 board, and you move the pawn
 one square at a time.
 
+![The pawn on the slanted 5×5 board after two moves; highlighted squares show where it can move next](docs/screenshot.png)
+
 - **Random port.** The server picks a random port from 1001 to 65535 at
   startup and prints it to the terminal.
 - **In-memory store.** There is no database. Each visitor's data is a
